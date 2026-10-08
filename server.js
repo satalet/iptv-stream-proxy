@@ -1,4 +1,7 @@
 const express = require('express');
+const http = require('http');
+const https = require('https');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -12,49 +15,90 @@ app.use((req, res, next) => {
 });
 
 app.get('/', (req, res) => {
-    res.send('IPTV Stream Proxy Active');
+    res.send('Universal IPTV Infinite Proxy Active');
 });
+
+function fetchUpstreamChunk(targetUrl, headers) {
+    return new Promise((resolve, reject) => {
+        try {
+            const parsed = new URL(targetUrl);
+            const client = parsed.protocol === 'https:' ? https : http;
+            const req = client.request({
+                hostname: parsed.hostname,
+                port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+                path: parsed.pathname + parsed.search,
+                method: 'GET',
+                rejectUnauthorized: false,
+                headers: {
+                    'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18',
+                    'Accept': '*/*',
+                    'Connection': 'keep-alive',
+                    ...headers
+                }
+            }, (res) => {
+                if ([301, 302, 307, 308].includes(res.statusCode) && res.headers.location) {
+                    const nextUrl = new URL(res.headers.location, targetUrl).toString();
+                    return resolve(fetchUpstreamChunk(nextUrl, headers));
+                }
+                resolve({ stream: res, statusCode: res.statusCode, headers: res.headers });
+            });
+            req.on('error', reject);
+            req.end();
+        } catch (e) {
+            reject(e);
+        }
+    });
+}
 
 app.get('/proxy', async (req, res) => {
     const targetUrl = req.query.url;
     if (!targetUrl) return res.status(400).send('Missing url parameter');
 
-    try {
-        const response = await fetch(targetUrl, {
-            method: 'GET',
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': '*/*',
-                'Connection': 'keep-alive'
-            },
-            redirect: 'follow'
-        });
+    let clientConnected = true;
+    req.on('close', () => {
+        clientConnected = false;
+    });
 
-        res.status(response.status);
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Content-Type', response.headers.get('content-type') || 'video/mp2t');
-        res.setHeader('Cache-Control', 'no-cache, no-store');
-        res.setHeader('Connection', 'keep-alive');
+    res.writeHead(200, {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'video/mp2t',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Connection': 'keep-alive',
+        'Transfer-Encoding': 'chunked'
+    });
 
-        // قراءة الـ Stream وتمريره للبث الحي المستمر
-        const reader = response.body.getReader();
+    // حلقة ضخ البث المستمر: لو فصل السيرفر الأصلي، نعيد الاتصال فوراً بنفس الدفق
+    while (clientConnected) {
+        try {
+            const upstream = await fetchUpstreamChunk(targetUrl);
+            
+            await new Promise((resolve) => {
+                upstream.stream.on('data', (chunk) => {
+                    if (clientConnected) {
+                        res.write(chunk);
+                    }
+                });
 
-        req.on('close', () => {
-            reader.cancel().catch(() => {});
-        });
+                upstream.stream.on('end', resolve);
+                upstream.stream.on('error', resolve);
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            res.write(Buffer.from(value));
-        }
-        res.end();
+                if (!clientConnected) {
+                    upstream.stream.destroy();
+                    resolve();
+                }
+            });
 
-    } catch (err) {
-        if (!res.headersSent) {
-            res.status(502).send('Proxy streaming error: ' + err.message);
+            // استراحة قصيرة جداً لتفادي الضغط عند تبديل الاتصال
+            if (clientConnected) {
+                await new Promise((r) => setTimeout(r, 100));
+            }
+        } catch (err) {
+            if (!clientConnected) break;
+            await new Promise((r) => setTimeout(r, 1000));
         }
     }
+
+    res.end();
 });
 
 app.listen(PORT, () => {
