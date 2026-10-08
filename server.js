@@ -1,7 +1,4 @@
 const express = require('express');
-const http = require('http');
-const https = require('https');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -15,74 +12,51 @@ app.use((req, res, next) => {
 });
 
 app.get('/', (req, res) => {
-    res.send('Universal IPTV Proxy is Running!');
+    res.send('IPTV Stream Proxy Active');
 });
 
-function pipeStream(targetUrl, res, clientReq, redirects = 0) {
-    if (redirects > 8) {
-        res.status(502).send("Too many redirects");
-        return;
-    }
+app.get('/proxy', async (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) return res.status(400).send('Missing url parameter');
 
     try {
-        const parsed = new URL(targetUrl);
-        const isHttps = parsed.protocol === 'https:';
-        const client = isHttps ? https : http;
-
-        const options = {
-            hostname: parsed.hostname,
-            port: parsed.port || (isHttps ? 443 : 80),
-            path: parsed.pathname + parsed.search,
+        const response = await fetch(targetUrl, {
             method: 'GET',
-            rejectUnauthorized: false,
             headers: {
-                'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': '*/*',
-                'Connection': 'keep-alive',
-                'Icy-MetaData': '1'
-            }
-        };
-
-        const upstreamReq = client.request(options, (upstreamRes) => {
-            if ([301, 302, 307, 308].includes(upstreamRes.statusCode) && upstreamRes.headers.location) {
-                const nextUrl = new URL(upstreamRes.headers.location, targetUrl).toString();
-                return pipeStream(nextUrl, res, clientReq, redirects + 1);
-            }
-
-            res.writeHead(upstreamRes.statusCode, {
-                'Access-Control-Allow-Origin': '*',
-                'Content-Type': upstreamRes.headers['content-type'] || 'video/mp2t',
-                'Cache-Control': 'no-cache, no-store, must-revalidate',
                 'Connection': 'keep-alive'
-            });
-
-            upstreamRes.pipe(res);
-
-            clientReq.on('close', () => {
-                upstreamRes.destroy();
-                upstreamReq.destroy();
-            });
+            },
+            redirect: 'follow'
         });
 
-        upstreamReq.on('error', (err) => {
-            if (!res.headersSent) {
-                res.status(502).send("Upstream error: " + err.message);
-            }
+        res.status(response.status);
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Content-Type', response.headers.get('content-type') || 'video/mp2t');
+        res.setHeader('Cache-Control', 'no-cache, no-store');
+        res.setHeader('Connection', 'keep-alive');
+
+        // قراءة الـ Stream وتمريره للبث الحي المستمر
+        const reader = response.body.getReader();
+
+        req.on('close', () => {
+            reader.cancel().catch(() => {});
         });
 
-        upstreamReq.end();
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            res.write(Buffer.from(value));
+        }
+        res.end();
 
     } catch (err) {
         if (!res.headersSent) {
-            res.status(400).send("URL error: " + err.message);
+            res.status(502).send('Proxy streaming error: ' + err.message);
         }
     }
-}
-
-app.get('/proxy', (req, res) => {
-    const targetUrl = req.query.url;
-    if (!targetUrl) return res.status(400).send('Missing url');
-    pipeStream(targetUrl, res, req);
 });
 
-app.listen(PORT, () => console.log(`Listening on ${PORT}`));
+app.listen(PORT, () => {
+    console.log(`Server listening on port ${PORT}`);
+});
