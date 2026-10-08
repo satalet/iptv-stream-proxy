@@ -1,0 +1,13 @@
+{
+  "name": "iptv-stream-proxy",
+  "version": "1.0.0",
+  "description": "Universal IPTV Stream Proxy with CORS and Redirect Support",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "express": "^4.19.0"
+  }
+}
