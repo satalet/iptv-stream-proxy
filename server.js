@@ -1,13 +1,9 @@
 const express = require('express');
-const axios = require('axios');
 const http = require('http');
 const https = require('https');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-const httpAgent = new http.Agent({ keepAlive: true });
-const httpsAgent = new https.Agent({ keepAlive: true, rejectUnauthorized: false });
 
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -22,53 +18,78 @@ app.get('/', (req, res) => {
     res.send('Universal IPTV Proxy is Running!');
 });
 
-app.get('/proxy', async (req, res) => {
-    const targetUrl = req.query.url;
-    if (!targetUrl) return res.status(400).send('Missing url parameter');
+function pipeStream(targetUrl, res, clientReq, redirects = 0) {
+    if (redirects > 8) {
+        res.status(502).send("Too many redirects");
+        return;
+    }
 
     try {
-        const headers = {
-            'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18',
-            'Accept': '*/*',
-            'Connection': 'keep-alive'
+        const parsed = new URL(targetUrl);
+        const isHttps = parsed.protocol === 'https:';
+        const client = isHttps ? https : http;
+
+        const options = {
+            hostname: parsed.hostname,
+            port: parsed.port || (isHttps ? 443 : 80),
+            path: parsed.pathname + parsed.search,
+            method: 'GET',
+            rejectUnauthorized: false,
+            headers: {
+                'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18',
+                'Accept': '*/*',
+                'Connection': 'keep-alive',
+            }
         };
 
-        if (req.headers.range) {
-            headers['Range'] = req.headers.range;
+        if (clientReq.headers.range) {
+            options.headers['Range'] = clientReq.headers.range;
         }
 
-        const response = await axios({
-            method: 'get',
-            url: targetUrl,
-            responseType: 'stream',
-            headers: headers,
-            httpAgent: httpAgent,
-            httpsAgent: httpsAgent,
-            maxRedirects: 10,
-            timeout: 20000
+        const upstreamReq = client.request(options, (upstreamRes) => {
+            // التعامل مع الـ 302 / 301
+            if ([301, 302, 307, 308].includes(upstreamRes.statusCode) && upstreamRes.headers.location) {
+                const nextUrl = new URL(upstreamRes.headers.location, targetUrl).toString();
+                return pipeStream(nextUrl, res, clientReq, redirects + 1);
+            }
+
+            // منع إرسال نهاية للملف حتى لا يقف البث عند 13 ثانية
+            res.status(upstreamRes.statusCode);
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.setHeader('Content-Type', upstreamRes.headers['content-type'] || 'video/mp2t');
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Connection', 'keep-alive');
+
+            // حذف Content-Length ليعلم المشغل أن هذا بث حي لا نهائي
+            res.removeHeader('Content-Length');
+
+            upstreamRes.pipe(res);
+
+            clientReq.on('close', () => {
+                upstreamRes.destroy();
+                upstreamReq.destroy();
+            });
         });
 
-        res.status(response.status);
-        res.setHeader('Content-Type', response.headers['content-type'] || 'video/mp2t');
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-
-        if (response.headers['content-range']) {
-            res.setHeader('Content-Range', response.headers['content-range']);
-        }
-
-        response.data.pipe(res);
-
-        req.on('close', () => {
-            if (response.data && typeof response.data.destroy === 'function') {
-                response.data.destroy();
+        upstreamReq.on('error', (err) => {
+            if (!res.headersSent) {
+                res.status(502).send("Proxy upstream error: " + err.message);
             }
         });
 
+        upstreamReq.end();
+
     } catch (err) {
         if (!res.headersSent) {
-            res.status(502).send('Upstream Proxy Error: ' + err.message);
+            res.status(400).send("Invalid target URL: " + err.message);
         }
     }
+}
+
+app.get('/proxy', (req, res) => {
+    const targetUrl = req.query.url;
+    if (!targetUrl) return res.status(400).send('Missing url parameter');
+    pipeStream(targetUrl, res, req);
 });
 
 app.listen(PORT, () => {
