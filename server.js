@@ -9,6 +9,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Expose-Headers', '*');
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     next();
 });
@@ -44,13 +45,16 @@ function forwardStream(targetUrl, clientRes, clientReq, redirects = 0) {
                 return forwardStream(nextUrl, clientRes, clientReq, redirects + 1);
             }
 
-            clientRes.writeHead(res.statusCode, {
+            // منع أي طول محدد لإجبار المشغل على وضع البث الحي اللانهائي
+            const headers = {
                 'Access-Control-Allow-Origin': '*',
                 'Content-Type': 'video/mp2t',
-                'Cache-Control': 'no-cache, no-store',
-                'Connection': 'keep-alive'
-            });
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Connection': 'keep-alive',
+                'Transfer-Encoding': 'chunked'
+            };
 
+            clientRes.writeHead(200, headers);
             res.pipe(clientRes);
 
             clientReq.on('close', () => {
