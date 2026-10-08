@@ -39,29 +39,22 @@ function pipeStream(targetUrl, res, clientReq, redirects = 0) {
                 'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18',
                 'Accept': '*/*',
                 'Connection': 'keep-alive',
+                'Icy-MetaData': '1'
             }
         };
 
-        if (clientReq.headers.range) {
-            options.headers['Range'] = clientReq.headers.range;
-        }
-
         const upstreamReq = client.request(options, (upstreamRes) => {
-            // التعامل مع الـ 302 / 301
             if ([301, 302, 307, 308].includes(upstreamRes.statusCode) && upstreamRes.headers.location) {
                 const nextUrl = new URL(upstreamRes.headers.location, targetUrl).toString();
                 return pipeStream(nextUrl, res, clientReq, redirects + 1);
             }
 
-            // منع إرسال نهاية للملف حتى لا يقف البث عند 13 ثانية
-            res.status(upstreamRes.statusCode);
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            res.setHeader('Content-Type', upstreamRes.headers['content-type'] || 'video/mp2t');
-            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-            res.setHeader('Connection', 'keep-alive');
-
-            // حذف Content-Length ليعلم المشغل أن هذا بث حي لا نهائي
-            res.removeHeader('Content-Length');
+            res.writeHead(upstreamRes.statusCode, {
+                'Access-Control-Allow-Origin': '*',
+                'Content-Type': upstreamRes.headers['content-type'] || 'video/mp2t',
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'Connection': 'keep-alive'
+            });
 
             upstreamRes.pipe(res);
 
@@ -73,7 +66,7 @@ function pipeStream(targetUrl, res, clientReq, redirects = 0) {
 
         upstreamReq.on('error', (err) => {
             if (!res.headersSent) {
-                res.status(502).send("Proxy upstream error: " + err.message);
+                res.status(502).send("Upstream error: " + err.message);
             }
         });
 
@@ -81,17 +74,15 @@ function pipeStream(targetUrl, res, clientReq, redirects = 0) {
 
     } catch (err) {
         if (!res.headersSent) {
-            res.status(400).send("Invalid target URL: " + err.message);
+            res.status(400).send("URL error: " + err.message);
         }
     }
 }
 
 app.get('/proxy', (req, res) => {
     const targetUrl = req.query.url;
-    if (!targetUrl) return res.status(400).send('Missing url parameter');
+    if (!targetUrl) return res.status(400).send('Missing url');
     pipeStream(targetUrl, res, req);
 });
 
-app.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Listening on ${PORT}`));
